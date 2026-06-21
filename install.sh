@@ -152,7 +152,22 @@ function create_lxc(){
   fi
 
   ROOTPW=$(gen_secret)
-  pct create "$VM_VMID" "$TPL" --hostname "$VM_HOSTNAME" --cores $VM_CORES --memory $VM_MEM --rootfs local:${VM_DISK} --net0 name=eth0,bridge=vmbr0,ip=dhcp --password "$ROOTPW" || true
+  # Determine storage for rootfs. Prefer local-lvm, otherwise pick first available storage.
+  if [ -z "${VM_STORAGE:-}" ]; then
+    if pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "local-lvm"; then
+      VM_STORAGE="local-lvm"
+    else
+      # pick first storage listed by pvesm (skip header)
+      VM_STORAGE=$(pvesm status 2>/dev/null | awk 'NR>1 {print $1; exit}' || true)
+    fi
+  fi
+  if [ -z "$VM_STORAGE" ]; then
+    log "No storage could be detected for container rootfs. Please specify VM_STORAGE in the script (e.g. local-lvm)."
+    exit 1
+  fi
+
+  log "Using storage ${VM_STORAGE} for rootfs"
+  pct create "$VM_VMID" "$TPL" --hostname "$VM_HOSTNAME" --cores $VM_CORES --memory $VM_MEM --rootfs ${VM_STORAGE}:${VM_DISK} --net0 name=eth0,bridge=vmbr0,ip=dhcp --password "$ROOTPW" || true
   pct start "$VM_VMID"
 
   log "Waiting for container to start"
