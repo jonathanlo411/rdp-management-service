@@ -227,14 +227,21 @@ def _execute_sequence(payload, seq_keys, typed_command=None):
     if rc != 0:
         app.logger.warning('windowactivate failed: rc=%s out=%r err=%r', rc, out, err)
 
+    time.sleep(2)
+
     for key in seq_keys:
-        _run([XDOTOOL_BIN, 'key', '--window', window_id, '--clearmodifiers', key], env=env)
-        time.sleep(1)
+        rc, out, err = _run([XDOTOOL_BIN, 'key', '--window', window_id, '--clearmodifiers', key], env=env)
+        if rc != 0:
+            app.logger.warning('xdotool key failed: key=%s rc=%s out=%r err=%r', key, rc, out, err)
+        time.sleep(1.5)
 
     if typed_command:
-        _run([XDOTOOL_BIN, 'type', '--window', window_id, '--clearmodifiers', typed_command], env=env)
-        time.sleep(1)
+        rc, out, err = _run([XDOTOOL_BIN, 'type', '--window', window_id, '--clearmodifiers', '--delay', '100', typed_command], env=env)
+        if rc != 0:
+            app.logger.warning('xdotool type failed: cmd=%s rc=%s out=%r err=%r', typed_command, rc, out, err)
+        time.sleep(1.5)
         _run([XDOTOOL_BIN, 'key', '--window', window_id, 'Return'], env=env)
+        time.sleep(1)
 
     time.sleep(5)
     try:
