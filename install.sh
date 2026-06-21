@@ -181,15 +181,10 @@ function create_lxc(){
   log "Creating LXC with vmid=${VM_VMID} hostname=${VM_HOSTNAME}"
 
   pveam update >/dev/null 2>&1 || true
-  if ! pveam available | grep -qE 'ubuntu-24.04-standard|ubuntu-24.04'; then
+  TPL=$(pveam available | awk '/ubuntu-24\.04-standard|ubuntu-24\.04/ { print $2; exit }' || true)
+  if [ -z "$TPL" ]; then
     log "ubuntu-24.04 template not found in pveam available list"
     pveam available | grep -i ubuntu || true
-    exit 1
-  fi
-
-  TPL=$(pveam available | awk '/ubuntu-24.04-standard|ubuntu-24.04/ { $1=""; sub(/^ +/, ""); print; exit }' || true)
-  if [ -z "$TPL" ]; then
-    log "Unable to select an ubuntu-24.04 template from pveam available"
     exit 1
   fi
 
