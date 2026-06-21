@@ -37,7 +37,12 @@ def execute(action):
 
     # load action module dynamically from actions package
     try:
-        mod = importlib.import_module(f'actions.{action}')
+        # Prefer package-qualified import when the app is installed as a package
+        try:
+            mod = importlib.import_module(f'app.actions.{action}')
+        except Exception:
+            # Fallback to importing as a top-level 'actions' package (dev mode)
+            mod = importlib.import_module(f'actions.{action}')
     except Exception:
         return (f'Action not found: {action}', 404)
 
