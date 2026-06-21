@@ -39,7 +39,7 @@ function configure_container(){
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends \
-    xfreerdp2-x11 xvfb xdotool python3 python3-pip git curl ca-certificates procps
+    freerdp2-x11 xvfb xdotool python3 python3-pip python3-venv git curl ca-certificates procps
 
   mkdir -p /opt/automation-runner
   chown root:root /opt/automation-runner
@@ -58,8 +58,12 @@ function configure_container(){
   fi
 
   if [ -f /opt/automation-runner/app/requirements.txt ]; then
-    python3 -m pip install --upgrade pip
-    python3 -m pip install -r /opt/automation-runner/app/requirements.txt
+    if [ ! -d /opt/automation-runner/.venv ]; then
+      python3 -m venv /opt/automation-runner/.venv
+      chown -R automation:automation /opt/automation-runner/.venv || true
+    fi
+    /opt/automation-runner/.venv/bin/python -m pip install --upgrade pip
+    /opt/automation-runner/.venv/bin/python -m pip install -r /opt/automation-runner/app/requirements.txt
   fi
 
   # Ensure service user
@@ -122,6 +126,23 @@ EOF
   fi
 }
 
+function find_storage_for_template(){
+  # Prefer a dir-backed storage for templates, typically 'local'
+  if pvesm status 2>/dev/null | awk 'NR>1 && $1 == "local" {print $1; exit}'; then
+    return 0
+  fi
+  pvesm status 2>/dev/null | awk 'NR>1 && $2 == "dir" {print $1; exit}'
+}
+
+function find_storage_for_rootfs(){
+  # Prefer local-lvm for LXC rootfs if available, otherwise choose another block storage
+  if pvesm status 2>/dev/null | awk 'NR>1 && $1 == "local-lvm" {exit 0} END {exit 1}'; then
+    echo "local-lvm"
+    return 0
+  fi
+  pvesm status 2>/dev/null | awk 'NR>1 && ($2 == "lvmthin" || $2 == "zfspool" || $2 == "btrfs") {print $1; exit}'
+}
+
 function create_lxc(){
   if ! command -v pct >/dev/null 2>&1; then
     log "pct command not found. Are you on a Proxmox host?"
@@ -138,72 +159,78 @@ function create_lxc(){
 
   log "Creating LXC with vmid=${VM_VMID} hostname=${VM_HOSTNAME}"
 
-  # ensure template available
-  if ! pveam available | grep -qa ubuntu-24.04; then
-    log "Downloading ubuntu-24.04-template via pveam"
-    pveam update
-    pveam download local ubuntu-24.04-standard || true
-  fi
-
-  TPL=$(pveam available | awk '/ubuntu-24.04/ {print $1; exit}' || true)
-  if [ -z "$TPL" ]; then
-    log "Unable to find an ubuntu-24.04 template via pveam. Please ensure a suitable template exists on the Proxmox host."
-    exit 1
-  fi
-
-  # ensure the template is downloaded into local storage
-  log "Ensuring template ${TPL} is available locally"
   pveam update >/dev/null 2>&1 || true
-  pveam download local "$TPL" >/dev/null 2>&1 || true
-
-  # locate the downloaded template file in template cache
-  TEMPLATE_FILE=$(ls /var/lib/vz/template/cache/*ubuntu*24.04* 2>/dev/null | head -n1 || true)
-  if [ -z "$TEMPLATE_FILE" ]; then
-    # try more general match
-    TEMPLATE_FILE=$(ls /var/lib/vz/template/cache/*ubuntu* 2>/dev/null | grep -m1 ubuntu || true)
-  fi
-  if [ -z "$TEMPLATE_FILE" ]; then
-    log "Failed to locate downloaded template in /var/lib/vz/template/cache. Please ensure pveam download succeeded."
+  if ! pveam available | grep -qE 'ubuntu-24.04-standard|ubuntu-24.04'; then
+    log "ubuntu-24.04 template not found in pveam available list"
+    pveam available | grep -i ubuntu || true
     exit 1
   fi
 
-  OSTPL="local:vztmpl/$(basename "$TEMPLATE_FILE")"
+  TPL=$(pveam available | awk '/ubuntu-24.04-standard|ubuntu-24.04/ { $1=""; sub(/^ +/, ""); print; exit }' || true)
+  if [ -z "$TPL" ]; then
+    log "Unable to select an ubuntu-24.04 template from pveam available"
+    exit 1
+  fi
+
+  TPL_STORAGE=${TPL_STORAGE:-$(find_storage_for_template)}
+  if [ -z "$TPL_STORAGE" ]; then
+    log "Unable to find a storage that supports vzdtmpl. Run 'pvesm status' and choose an appropriate storage."
+    pvesm status
+    exit 1
+  fi
+
+  if ! pveam download "$TPL_STORAGE" "$TPL" >/dev/null 2>&1; then
+    log "Failed to download template ${TPL} into storage ${TPL_STORAGE}."
+    pveam available | grep -i ubuntu || true
+    exit 1
+  fi
+
+  OSTPL="${TPL_STORAGE}:vztmpl/${TPL}"
   log "Using ostemplate ${OSTPL}"
 
   ROOTPW=$(gen_secret)
-  # Determine storage for rootfs. Prefer local-lvm, otherwise pick first available storage.
-  if [ -z "${VM_STORAGE:-}" ]; then
-    if pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "local-lvm"; then
-      VM_STORAGE="local-lvm"
-    else
-      # pick first storage listed by pvesm (skip header)
-      VM_STORAGE=$(pvesm status 2>/dev/null | awk 'NR>1 {print $1; exit}' || true)
-    fi
-  fi
+
+  VM_STORAGE=${VM_STORAGE:-$(find_storage_for_rootfs)}
   if [ -z "$VM_STORAGE" ]; then
-    log "No storage could be detected for container rootfs. Please specify VM_STORAGE in the script (e.g. local-lvm)."
+    log "Unable to find a storage for rootfs. Run 'pvesm status' and choose an appropriate storage for containers."
+    pvesm status
     exit 1
   fi
 
-  # ensure disk size has G suffix
-  if [[ "$VM_DISK" =~ ^[0-9]+$ ]]; then
-    VM_DISK="${VM_DISK}G"
+  STORAGE_TYPE=$(pvesm status 2>/dev/null | awk -v s="$VM_STORAGE" '$1 == s {print $2}')
+  ROOTFS_SPEC=""
+  if [[ "$STORAGE_TYPE" =~ ^(lvmthin|zfspool|btrfs)$ ]]; then
+    if [[ "$VM_DISK" =~ ^([0-9]+)G$ ]] || [[ "$VM_DISK" =~ ^([0-9]+)g$ ]] || [[ "$VM_DISK" =~ ^([0-9]+)$ ]]; then
+      ROOTFS_SPEC="${BASH_REMATCH[1]}"
+    else
+      ROOTFS_SPEC="$VM_DISK"
+    fi
+  else
+    if [[ "$VM_DISK" =~ ^[0-9]+$ ]]; then
+      ROOTFS_SPEC="${VM_DISK}G"
+    else
+      ROOTFS_SPEC="$VM_DISK"
+    fi
   fi
 
-  log "Using storage ${VM_STORAGE} for rootfs"
-  pct create "$VM_VMID" "$OSTPL" --hostname "$VM_HOSTNAME" --cores $VM_CORES --memory $VM_MEM --rootfs ${VM_STORAGE}:${VM_DISK} --net0 name=eth0,bridge=vmbr0,ip=dhcp --password "$ROOTPW" || true
+  log "Using storage ${VM_STORAGE} for rootfs (type=${STORAGE_TYPE}, spec=${ROOTFS_SPEC})"
+  pct create "$VM_VMID" "$OSTPL" --hostname "$VM_HOSTNAME" --cores $VM_CORES --memory $VM_MEM --rootfs ${VM_STORAGE}:${ROOTFS_SPEC} --net0 name=eth0,bridge=vmbr0,ip=dhcp --password "$ROOTPW"
   pct start "$VM_VMID"
+
+  # clean up host template archive to avoid leaving tarballs behind
+  if [ "$TPL_STORAGE" = "local" ] && [ -f "/var/lib/vz/template/cache/${TPL}" ]; then
+    rm -f "/var/lib/vz/template/cache/${TPL}"
+    log "Removed downloaded template /var/lib/vz/template/cache/${TPL} from host"
+  fi
 
   log "Waiting for container to start"
   sleep 5
 
-  # Run installer inside the container by invoking the same installer through curl
   if [ -n "${INSTALLER_URL}" ]; then
     log "Bootstrapping inside container via ${INSTALLER_URL}"
     pct exec "$VM_VMID" -- bash -lc "apt-get update && apt-get install -y curl ca-certificates && curl -fsSL ${INSTALLER_URL} | bash -s -- inside"
   else
     log "INSTALLER_URL not set; trying to fetch installer from the host copy"
-    # If script is a local file, push it into container and run
     if [ -f "$0" ]; then
       pct push "$VM_VMID" "$0" /tmp/install.sh
       pct exec "$VM_VMID" -- bash -lc "bash /tmp/install.sh inside"

@@ -8,7 +8,7 @@ User=automation
 Group=automation
 WorkingDirectory=/opt/automation-runner
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 /opt/automation-runner/app/app.py
+ExecStart=/opt/automation-runner/.venv/bin/python /opt/automation-runner/app/app.py
 Restart=on-failure
 RestartSec=5s
 
