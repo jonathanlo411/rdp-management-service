@@ -85,6 +85,9 @@ function configure_container(){
     useradd --system --no-create-home --shell /usr/sbin/nologin automation || true
   fi
 
+  mkdir -p /opt/automation-runner/.config/freerdp
+  chown -R automation:automation /opt/automation-runner/.config || true
+
   # Secrets file
   ENV_FILE=/opt/automation-runner/.env
   if [ ! -f "$ENV_FILE" ]; then

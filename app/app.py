@@ -57,10 +57,17 @@ XFREERDP_BIN = _resolve_binary('xfreerdp')
 XDOTOOL_BIN = _resolve_binary('xdotool')
 
 
-def _run(cmd, timeout=None, env=None):
-    env = env or os.environ.copy()
+def _build_subprocess_env():
+    env = os.environ.copy()
+    env['HOME'] = '/opt/automation-runner'
+    env['XDG_CONFIG_HOME'] = '/opt/automation-runner/.config'
     if BIN_DIR:
         env['PATH'] = BIN_DIR + os.pathsep + env.get('PATH', '')
+    return env
+
+
+def _run(cmd, timeout=None, env=None):
+    env = env or _build_subprocess_env()
     if isinstance(cmd, str):
         proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     else:
@@ -77,7 +84,7 @@ def _run(cmd, timeout=None, env=None):
 
 def _start_xvfb(display=None):
     def try_start(display_value):
-        env = os.environ.copy()
+        env = _build_subprocess_env()
         env['DISPLAY'] = display_value
         app.logger.warning('Starting Xvfb: %s display=%s', XVFB_BIN, display_value)
         proc = subprocess.Popen(
@@ -110,7 +117,7 @@ def _start_xvfb(display=None):
 
 
 def _start_rdp(display, host, user, password):
-    env = os.environ.copy()
+    env = _build_subprocess_env()
     env['DISPLAY'] = display
     args = [
         XFREERDP_BIN,
@@ -140,7 +147,7 @@ def _start_rdp(display, host, user, password):
 
 
 def _find_rdp_window(display, timeout=15):
-    env = os.environ.copy()
+    env = _build_subprocess_env()
     env['DISPLAY'] = display
 
     def search_by_title():
