@@ -9,7 +9,7 @@ Quick deploy examples
 1) Run the installer one-liner (after hosting this repo and updating `install.sh` with your repo URL):
 
 ```bash
-curl -fsSL jonathanlo411/rdp-management-service/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jonathanlo411/rdp-management-service/refs/heads/main/install.sh | bash
 ```
 
 2) If you prefer to create the LXC manually on a Proxmox host, example `pct` command:
