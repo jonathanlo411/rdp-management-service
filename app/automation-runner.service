@@ -1,0 +1,16 @@
+[Unit]
+Description=Automation Runner Service
+After=network.target
+
+[Service]
+Type=simple
+User=automation
+Group=automation
+WorkingDirectory=/opt/automation-runner
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/automation-runner/app/app.py
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
