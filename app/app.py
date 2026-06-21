@@ -5,6 +5,7 @@ import time
 from flask import Flask, jsonify, request, abort
 from dotenv import load_dotenv
 import subprocess
+import config
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = '/opt/automation-runner/.env'
@@ -30,7 +31,6 @@ def authorize(req):
 def health():
     return jsonify({ 'status': 'healthy' })
 
-@app.route('/execute/<action>', methods=['POST'])
 def _run(cmd, timeout=None):
     proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -61,8 +61,6 @@ def _execute_sequence(payload, seq_keys):
         raise RuntimeError('Payload must include a "target" field')
 
     # try configured targets first
-    from . import config
-
     tgt = config.get_target(target_name)
     if not tgt:
         host = os.getenv('WINDOWS_HOST')
