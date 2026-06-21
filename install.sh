@@ -105,9 +105,9 @@ EOF
     cat > "$TARGETS_JSON" <<EOF
 {
   "gaming_pc": {
-    "host": "192.168.1.100",
-    "user": "myuser",
-    "password": "mypassword"
+    "host": "<WINDOWS_HOST>",
+    "user": "<WINDOWS_USER>",
+    "password": "<WINDOWS_PASSWORD>"
   }
 }
 EOF

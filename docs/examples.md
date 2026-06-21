@@ -42,7 +42,7 @@ sudo nano /opt/automation-runner/targets.json
 
 # Example format:
 {
-  "gaming_pc": { "host": "192.168.1.100", "user": "myuser", "password": "mypassword" },
-  "office_pc": { "host": "192.168.1.101", "user": "admin", "password": "secret" }
+  "gaming_pc": { "host": "192.168.1.100", "user": "YOUR_WINDOWS_USER", "password": "YOUR_WINDOWS_PASSWORD" },
+  "office_pc": { "host": "192.168.1.101", "user": "YOUR_WINDOWS_USER", "password": "YOUR_WINDOWS_PASSWORD" }
 }
 ```
