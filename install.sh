@@ -33,6 +33,27 @@ function gen_secret(){
   fi
 }
 
+function derive_installer_url(){
+  if [ -n "${INSTALLER_URL}" ]; then
+    echo "$INSTALLER_URL"
+    return
+  fi
+
+  if [[ "${INSTALLER_GIT_REPO}" =~ ^https://github.com/([^/]+)/([^/.]+)(\.git)?$ ]]; then
+    local owner=${BASH_REMATCH[1]}
+    local repo=${BASH_REMATCH[2]}
+    echo "https://raw.githubusercontent.com/${owner}/${repo}/main/install.sh"
+    return
+  fi
+
+  if [[ "${INSTALLER_GIT_REPO}" =~ ^git@github.com:([^/]+)/([^/.]+)\.git$ ]]; then
+    local owner=${BASH_REMATCH[1]}
+    local repo=${BASH_REMATCH[2]}
+    echo "https://raw.githubusercontent.com/${owner}/${repo}/main/install.sh"
+    return
+  fi
+}
+
 function configure_container(){
   log "Running in-container setup"
 
@@ -227,17 +248,21 @@ function create_lxc(){
   sleep 5
 
   if [ -n "${INSTALLER_URL}" ]; then
-    log "Bootstrapping inside container via ${INSTALLER_URL}"
-    pct exec "$VM_VMID" -- bash -lc "apt-get update && apt-get install -y curl ca-certificates && curl -fsSL ${INSTALLER_URL} | bash -s -- inside"
+    INSTALLER_FETCH_URL="${INSTALLER_URL}"
   else
-    log "INSTALLER_URL not set; trying to fetch installer from the host copy"
-    if [ -f "$0" ]; then
-      pct push "$VM_VMID" "$0" /tmp/install.sh
-      pct exec "$VM_VMID" -- bash -lc "bash /tmp/install.sh inside"
-    else
-      log "Cannot bootstrap installer inside container: no INSTALLER_URL and installer not a local file"
-      exit 1
-    fi
+    INSTALLER_FETCH_URL="$(derive_installer_url)"
+  fi
+
+  if [ -n "${INSTALLER_FETCH_URL}" ]; then
+    log "Bootstrapping inside container via ${INSTALLER_FETCH_URL}"
+    pct exec "$VM_VMID" -- bash -lc "apt-get update && apt-get install -y curl ca-certificates && curl -fsSL ${INSTALLER_FETCH_URL} | bash -s -- inside"
+  elif [ -f "$0" ]; then
+    log "BOOTSTRAP: pushing local installer copy into container"
+    pct push "$VM_VMID" "$0" /tmp/install.sh
+    pct exec "$VM_VMID" -- bash -lc "bash /tmp/install.sh inside"
+  else
+    log "Cannot bootstrap installer inside container: installer URL could not be derived and no local file available"
+    exit 1
   fi
 }
 
