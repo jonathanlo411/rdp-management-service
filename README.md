@@ -6,7 +6,7 @@ See `docs/homeassistant.md` for Home Assistant integration examples.
 
 Quick deploy examples
 
-1) Run the installer one-liner (after hosting this repo and updating `install.sh` with your repo URL):
+1) Run the installer one-liner:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jonathanlo411/rdp-management-service/refs/heads/main/install.sh | bash
@@ -21,7 +21,7 @@ pct create 101 ubuntu-24.04-standard --hostname automation-runner --cores 1 --me
 pct start 101
 
 # then run the installer inside the container (replace 101 with your vmid)
-pct exec 101 -- bash -lc "apt-get update && apt-get install -y curl && curl -fsSL https://your.repo.url/install.sh | bash -s -- inside"
+pct exec 101 -- bash -lc "apt-get update && apt-get install -y curl && curl -fsSL https://raw.githubusercontent.com/jonathanlo411/rdp-management-service/refs/heads/main/install.sh | bash -s -- inside"
 ```
 
 3) After installation, edit `/opt/automation-runner/.env` and `/opt/automation-runner/targets.json` to add secrets and targets.

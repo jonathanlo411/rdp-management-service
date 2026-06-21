@@ -4,7 +4,7 @@ import sys
 import time
 from flask import Flask, jsonify, request, abort
 from dotenv import load_dotenv
-import importlib
+import subprocess
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = '/opt/automation-runner/.env'
@@ -31,35 +31,103 @@ def health():
     return jsonify({ 'status': 'healthy' })
 
 @app.route('/execute/<action>', methods=['POST'])
-def execute(action):
+def _run(cmd, timeout=None):
+    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+    return proc.returncode, out, err
+
+
+def _start_xvfb(display=':99'):
+    subprocess.Popen(f'Xvfb {display} -screen 0 1024x768x24 >/dev/null 2>&1 &', shell=True)
+
+
+def _start_rdp(display, host, user, password):
+    xfreerdp_cmd = (
+        f'DISPLAY={display} xfreerdp /v:{host} /u:{user} /p:{password} '
+        f'/cert-ignore /dynamic-resolution +clipboard /sound:off /microphone:off'
+    )
+    return subprocess.Popen(f'{xfreerdp_cmd} >/dev/null 2>&1 &', shell=True)
+
+
+def _execute_sequence(payload, seq_keys):
+    # payload should include 'target' (name) or fallback env vars
+    payload = payload or {}
+    target_name = payload.get('target')
+    if not target_name:
+        raise RuntimeError('Payload must include a "target" field')
+
+    # try configured targets first
+    from . import config
+
+    tgt = config.get_target(target_name)
+    if not tgt:
+        host = os.getenv('WINDOWS_HOST')
+        user = os.getenv('WINDOWS_USER')
+        password = os.getenv('WINDOWS_PASSWORD')
+        if not (host and user and password):
+            raise RuntimeError(f'Target {target_name} not found and no fallback env vars set')
+        tgt = { 'host': host, 'user': user, 'password': password }
+
+    host = tgt.get('host')
+    user = tgt.get('user')
+    password = tgt.get('password')
+    if not (host and user and password):
+        raise RuntimeError(f'Target {target_name} missing host/user/password')
+
+    display = payload.get('display', ':99')
+
+    _start_xvfb(display)
+    time.sleep(1)
+    p = _start_rdp(display, host, user, password)
+
+    # Wait for desktop to appear
+    time.sleep(payload.get('wait', 12))
+
+    for key in seq_keys:
+        cmd = f'DISPLAY={display} xdotool key {key}'
+        _run(cmd)
+        time.sleep(1)
+
+    time.sleep(5)
+    try:
+        p.terminate()
+    except Exception:
+        pass
+
+    return { 'status': 'sequence_sent', 'target': target_name }
+
+
+@app.route('/execute/shutdown', methods=['POST'])
+def execute_shutdown():
     if not authorize(request):
         return ('Unauthorized', 401)
-
-    # load action module dynamically from actions package
-    try:
-        # Prefer package-qualified import when the app is installed as a package
-        try:
-            mod = importlib.import_module(f'app.actions.{action}')
-        except Exception:
-            # Fallback to importing as a top-level 'actions' package (dev mode)
-            mod = importlib.import_module(f'actions.{action}')
-    except Exception:
-        return (f'Action not found: {action}', 404)
-
-    if not hasattr(mod, 'execute'):
-        return (f'Action {action} has no execute() function', 500)
-
-    # parse json payload if any
     payload = request.get_json(silent=True) or {}
-    # allow target via query string too
     if 'target' not in payload and 'target' in request.args:
         payload['target'] = request.args.get('target')
-
     try:
-        result = mod.execute(payload)
+        result = _execute_sequence(payload, ['super+x', 'u', 'u'])
         return jsonify({ 'result': result })
     except Exception as e:
-        app.logger.exception('Action execution failed')
+        app.logger.exception('Shutdown action failed')
+        return (f'Action failed: {e}', 500)
+
+
+@app.route('/execute/reboot', methods=['POST'])
+def execute_reboot():
+    if not authorize(request):
+        return ('Unauthorized', 401)
+    payload = request.get_json(silent=True) or {}
+    if 'target' not in payload and 'target' in request.args:
+        payload['target'] = request.args.get('target')
+    try:
+        result = _execute_sequence(payload, ['super+x', 'u', 'r'])
+        return jsonify({ 'result': result })
+    except Exception as e:
+        app.logger.exception('Reboot action failed')
         return (f'Action failed: {e}', 500)
 
 if __name__ == '__main__':

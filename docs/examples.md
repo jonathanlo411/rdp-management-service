@@ -1,15 +1,15 @@
 Examples and quick commands
 
-1) One-liner installer (host the repo and point to raw `install.sh`):
+1) One-liner installer:
 
 ```bash
-curl -fsSL https://your.repo.url/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jonathanlo411/rdp-management-service/refs/heads/main/install.sh | bash
 ```
 
 2) Run installer inside an existing Ubuntu container:
 
 ```bash
-curl -fsSL https://your.repo.url/install.sh | bash -s -- inside
+curl -fsSL https://raw.githubusercontent.com/jonathanlo411/rdp-management-service/refs/heads/main/install.sh | bash -s -- inside
 ```
 
 3) Manual Proxmox `pct` example to create an LXC (change `101` to a free VMID):
@@ -20,7 +20,7 @@ pct create 101 ubuntu-24.04-standard --hostname automation-runner --cores 1 --me
 pct start 101
 
 # bootstrap the installer inside the LXC
-pct exec 101 -- bash -lc "apt-get update && apt-get install -y curl && curl -fsSL https://your.repo.url/install.sh | bash -s -- inside"
+pct exec 101 -- bash -lc "apt-get update && apt-get install -y curl && curl -fsSL https://raw.githubusercontent.com/jonathanlo411/rdp-management-service/refs/heads/main/install.sh | bash -s -- inside"
 ```
 
 4) Triggering a shutdown or reboot from a machine (use the API key from `/opt/automation-runner/.env`):

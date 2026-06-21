@@ -7,7 +7,6 @@ set -euo pipefail
 #  - Inside container: curl -fsSL <URL>/install.sh | bash -s -- inside
 
 INSTALLER_GIT_REPO="https://github.com/jonathanlo411/rdp-management-service.git"
-INSTALLER_URL="" # optional: if known, set the script URL here
 
 VM_HOSTNAME="automation-runner"
 VM_VMID="" # auto if empty
@@ -34,18 +33,12 @@ function gen_secret(){
 }
 
 function derive_installer_url(){
-  if [ -n "${INSTALLER_URL}" ]; then
-    echo "$INSTALLER_URL"
-    return
-  fi
-
   if [[ "${INSTALLER_GIT_REPO}" =~ ^https://github.com/([^/]+)/([^/.]+)(\.git)?$ ]]; then
     local owner=${BASH_REMATCH[1]}
     local repo=${BASH_REMATCH[2]}
     echo "https://raw.githubusercontent.com/${owner}/${repo}/main/install.sh"
     return
   fi
-
   if [[ "${INSTALLER_GIT_REPO}" =~ ^git@github.com:([^/]+)/([^/.]+)\.git$ ]]; then
     local owner=${BASH_REMATCH[1]}
     local repo=${BASH_REMATCH[2]}
@@ -98,10 +91,6 @@ function configure_container(){
     API_KEY=$(gen_secret)
     cat > "$ENV_FILE" <<EOF
 API_KEY=${API_KEY}
-# Set your Windows target here
-WINDOWS_HOST=
-WINDOWS_USER=
-WINDOWS_PASSWORD=
 EOF
     chown automation:automation "$ENV_FILE" || true
     chmod 600 "$ENV_FILE" || true
@@ -242,23 +231,9 @@ function create_lxc(){
   log "Waiting for container to start"
   sleep 5
 
-  if [ -n "${INSTALLER_URL}" ]; then
-    INSTALLER_FETCH_URL="${INSTALLER_URL}"
-  else
-    INSTALLER_FETCH_URL="$(derive_installer_url)"
-  fi
-
-  if [ -n "${INSTALLER_FETCH_URL}" ]; then
-    log "Bootstrapping inside container via ${INSTALLER_FETCH_URL}"
-    pct exec "$VM_VMID" -- bash -lc "apt-get update && apt-get install -y curl ca-certificates && curl -fsSL ${INSTALLER_FETCH_URL} | bash -s -- inside"
-  elif [ -f "$0" ]; then
-    log "BOOTSTRAP: pushing local installer copy into container"
-    pct push "$VM_VMID" "$0" /tmp/install.sh
-    pct exec "$VM_VMID" -- bash -lc "bash /tmp/install.sh inside"
-  else
-    log "Cannot bootstrap installer inside container: installer URL could not be derived and no local file available"
-    exit 1
-  fi
+  INSTALLER_FETCH_URL="$(derive_installer_url)"
+  log "Bootstrapping inside container via ${INSTALLER_FETCH_URL}"
+  pct exec "$VM_VMID" -- bash -lc "apt-get update && apt-get install -y curl ca-certificates && curl -fsSL ${INSTALLER_FETCH_URL} | bash -s -- inside"
 }
 
 if grep -qa container=lxc /proc/1/environ 2>/dev/null || [ -f /.dockerenv ] || [ -f /run/systemd/container ]; then
