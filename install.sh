@@ -145,11 +145,30 @@ function create_lxc(){
     pveam download local ubuntu-24.04-standard || true
   fi
 
-  TPL=$(pveam available | awk '/ubuntu-24.04-standard/ {print $1; exit}' || true)
+  TPL=$(pveam available | awk '/ubuntu-24.04/ {print $1; exit}' || true)
   if [ -z "$TPL" ]; then
-    log "Unable to find ubuntu-24.04-standard template via pveam. Please ensure a suitable template exists on the Proxmox host."
+    log "Unable to find an ubuntu-24.04 template via pveam. Please ensure a suitable template exists on the Proxmox host."
     exit 1
   fi
+
+  # ensure the template is downloaded into local storage
+  log "Ensuring template ${TPL} is available locally"
+  pveam update >/dev/null 2>&1 || true
+  pveam download local "$TPL" >/dev/null 2>&1 || true
+
+  # locate the downloaded template file in template cache
+  TEMPLATE_FILE=$(ls /var/lib/vz/template/cache/*ubuntu*24.04* 2>/dev/null | head -n1 || true)
+  if [ -z "$TEMPLATE_FILE" ]; then
+    # try more general match
+    TEMPLATE_FILE=$(ls /var/lib/vz/template/cache/*ubuntu* 2>/dev/null | grep -m1 ubuntu || true)
+  fi
+  if [ -z "$TEMPLATE_FILE" ]; then
+    log "Failed to locate downloaded template in /var/lib/vz/template/cache. Please ensure pveam download succeeded."
+    exit 1
+  fi
+
+  OSTPL="local:vztmpl/$(basename "$TEMPLATE_FILE")"
+  log "Using ostemplate ${OSTPL}"
 
   ROOTPW=$(gen_secret)
   # Determine storage for rootfs. Prefer local-lvm, otherwise pick first available storage.
@@ -166,8 +185,13 @@ function create_lxc(){
     exit 1
   fi
 
+  # ensure disk size has G suffix
+  if [[ "$VM_DISK" =~ ^[0-9]+$ ]]; then
+    VM_DISK="${VM_DISK}G"
+  fi
+
   log "Using storage ${VM_STORAGE} for rootfs"
-  pct create "$VM_VMID" "$TPL" --hostname "$VM_HOSTNAME" --cores $VM_CORES --memory $VM_MEM --rootfs ${VM_STORAGE}:${VM_DISK} --net0 name=eth0,bridge=vmbr0,ip=dhcp --password "$ROOTPW" || true
+  pct create "$VM_VMID" "$OSTPL" --hostname "$VM_HOSTNAME" --cores $VM_CORES --memory $VM_MEM --rootfs ${VM_STORAGE}:${VM_DISK} --net0 name=eth0,bridge=vmbr0,ip=dhcp --password "$ROOTPW" || true
   pct start "$VM_VMID"
 
   log "Waiting for container to start"
