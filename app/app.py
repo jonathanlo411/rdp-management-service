@@ -68,9 +68,20 @@ def get_target(name):
 # Core: run a shell command, capturing output, with a timeout
 # ---------------------------------------------------------------------------
 
-def run(cmd, timeout=30):
+def run(cmd, timeout=30, env=None):
     """Run a command (list or string). Returns (returncode, stdout, stderr)."""
-    log.debug('RUN: %s', cmd if isinstance(cmd, str) else ' '.join(cmd))
+    if isinstance(cmd, list):
+        log.debug('RUN: %s', ' '.join(str(c) for c in cmd))
+    else:
+        log.debug('RUN: %s', cmd)
+
+    # Safety net: if caller forgot to pass env, build a minimal one with DISPLAY
+    # so xdotool never sees DISPLAY=(null)
+    if env is None:
+        env = os.environ.copy()
+
+    log.debug('  DISPLAY=%s', env.get('DISPLAY', '(not set)'))
+
     result = subprocess.run(
         cmd,
         shell=isinstance(cmd, str),
@@ -78,6 +89,7 @@ def run(cmd, timeout=30):
         stderr=subprocess.PIPE,
         text=True,
         timeout=timeout,
+        env=env,
     )
     if result.returncode != 0:
         log.warning('  rc=%s stdout=%r stderr=%r', result.returncode, result.stdout[:200], result.stderr[:200])
@@ -117,20 +129,25 @@ def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15
     display = find_free_display()
     log.info('Using display %s', display)
 
-    # Build a clean env that every subprocess will use — same as exporting
-    # DISPLAY in the shell and running everything in the same session.
-    env = os.environ.copy()
-    env['DISPLAY'] = display
-    env['HOME'] = ROOT_DIR
-    env['XDG_CONFIG_HOME'] = os.path.join(ROOT_DIR, '.config')
-
-    xvfb_bin   = shutil.which('Xvfb')
+    xvfb_bin     = shutil.which('Xvfb')
     xfreerdp_bin = shutil.which('xfreerdp')
     xdotool_bin  = shutil.which('xdotool')
+    xdpyinfo_bin = shutil.which('xdpyinfo')
 
     for name, path in [('Xvfb', xvfb_bin), ('xfreerdp', xfreerdp_bin), ('xdotool', xdotool_bin)]:
         if not path:
             raise RuntimeError(f'{name} not found in PATH')
+
+    # Build env once — every subprocess gets this exact dict.
+    # Also stamp DISPLAY onto os.environ so that any code path that
+    # accidentally omits env= still gets the right display.
+    env = os.environ.copy()
+    env['DISPLAY'] = display
+    env['HOME'] = ROOT_DIR
+    env['XDG_CONFIG_HOME'] = os.path.join(ROOT_DIR, '.config')
+    os.environ['DISPLAY'] = display   # belt-and-suspenders
+
+    log.info('env DISPLAY=%s HOME=%s', env['DISPLAY'], env['HOME'])
 
     # ------------------------------------------------------------------
     # Step 1: Start Xvfb
@@ -145,6 +162,13 @@ def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15
     time.sleep(2)
     if xvfb_proc.poll() is not None:
         raise RuntimeError(f'Xvfb failed to start (rc={xvfb_proc.returncode})')
+
+    # Verify Xvfb is actually accepting connections before we go further
+    if xdpyinfo_bin:
+        rc, _, _ = run([xdpyinfo_bin, '-display', display], timeout=5, env=env)
+        if rc != 0:
+            raise RuntimeError(f'Xvfb started but display {display} is not accepting connections')
+        log.info('Xvfb display %s verified with xdpyinfo', display)
 
     try:
         # ------------------------------------------------------------------
@@ -186,7 +210,7 @@ def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15
             wid = None
             deadline = time.time() + 15
             while time.time() < deadline:
-                rc, out, _ = run([xdotool_bin, 'search', '--name', 'automation-runner'])
+                rc, out, _ = run([xdotool_bin, 'search', '--name', 'automation-runner'], env=env)
                 if rc == 0 and out.strip():
                     wid = out.strip().splitlines()[0]
                     break
@@ -194,7 +218,7 @@ def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15
 
             if not wid:
                 # Fallback: grab whatever window exists
-                rc, out, _ = run([xdotool_bin, 'search', '--name', '.*'])
+                rc, out, _ = run([xdotool_bin, 'search', '--name', '.*'], env=env)
                 if rc == 0 and out.strip():
                     wid = out.strip().splitlines()[0]
                     log.warning('Title search failed; falling back to first window: %s', wid)
@@ -203,26 +227,26 @@ def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15
                 raise RuntimeError('Could not find any X window to interact with')
 
             # Log window name so we know exactly what we're targeting
-            rc, name_out, _ = run([xdotool_bin, 'getwindowname', wid])
+            rc, name_out, _ = run([xdotool_bin, 'getwindowname', wid], env=env)
             log.info('Targeting window id=%s name=%r', wid, name_out.strip())
 
             # ------------------------------------------------------------------
             # Step 5: Activate window and send input
             # ------------------------------------------------------------------
             log.info('Activating window %s', wid)
-            run([xdotool_bin, 'windowactivate', '--sync', wid], timeout=10)
+            run([xdotool_bin, 'windowactivate', '--sync', wid], timeout=10, env=env)
             time.sleep(1)
 
             for key in key_sequence:
                 log.info('Sending key: %s', key)
-                run([xdotool_bin, 'key', '--window', wid, '--clearmodifiers', key])
+                run([xdotool_bin, 'key', '--window', wid, '--clearmodifiers', key], env=env)
                 time.sleep(1)
 
             if typed_command:
                 log.info('Typing command: %s', typed_command)
-                run([xdotool_bin, 'type', '--window', wid, '--clearmodifiers', '--delay', '100', typed_command])
+                run([xdotool_bin, 'type', '--window', wid, '--clearmodifiers', '--delay', '100', typed_command], env=env)
                 time.sleep(1)
-                run([xdotool_bin, 'key', '--window', wid, 'Return'])
+                run([xdotool_bin, 'key', '--window', wid, 'Return'], env=env)
                 time.sleep(1)
 
             log.info('Sequence complete')
@@ -297,4 +321,4 @@ def execute_reboot():
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False, threaded=False)
