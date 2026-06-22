@@ -1,0 +1,18 @@
+[Unit]
+Description=Automation Runner Service
+After=network.target
+
+[Service]
+Type=simple
+User=automation
+Group=automation
+WorkingDirectory=/opt/automation-runner
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/opt/automation-runner
+Environment=XDG_CONFIG_HOME=/opt/automation-runner/.config
+ExecStart=/opt/automation-runner/.venv/bin/python /opt/automation-runner/app/app.py
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
