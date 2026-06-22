@@ -110,7 +110,7 @@ def find_free_display(start=99, end=120):
 
 
 # ---------------------------------------------------------------------------
-# The core sequence — mirrors the working shell script exactly
+# The core RDP sequence
 # ---------------------------------------------------------------------------
 
 def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=5):
@@ -240,14 +240,14 @@ def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=5)
             for key in key_sequence:
                 log.info('Sending key: %s', key)
                 run([xdotool_bin, 'key', '--window', wid, '--clearmodifiers', key], env=env)
-                time.sleep(1)
+                time.sleep(0.4)
 
             if typed_command:
                 log.info('Typing command: %s', typed_command)
                 run([xdotool_bin, 'type', '--window', wid, '--clearmodifiers', '--delay', '100', typed_command], env=env)
                 time.sleep(1)
                 run([xdotool_bin, 'key', '--window', wid, 'Return'], env=env)
-                time.sleep(1)
+                time.sleep(0.4)
 
             log.info('Sequence complete')
             time.sleep(3)
@@ -298,7 +298,7 @@ def _handle_action(key_sequence, typed_command=None):
     if not (host and user and password):
         return f'Target "{target_name}" is missing host, user, or password', 500
 
-    wait = int(payload.get('wait', 15))
+    wait = int(payload.get('wait', 5))
 
     try:
         rdp_sequence(host, user, password, key_sequence, typed_command, wait=wait)
