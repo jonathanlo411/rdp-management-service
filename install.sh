@@ -122,14 +122,15 @@ EOF
 
   # Health check
   sleep 3
-  if curl -fsS --connect-timeout 3 http://127.0.0.1:5000/health >/dev/null 2>&1; then
-    log "Health endpoint OK"
-    log "API_KEY: $(grep API_KEY /opt/automation-runner/.env | cut -d= -f2)"
-  else
-    log "Health check failed."
-    log "Check logs: journalctl -u automation-runner.service -n 50 --no-pager"
-    log "Or: tail -f /var/log/automation-runner.log"
-  fi
+  for i in {1..20}; do
+    if curl -fsS http://127.0.0.1:5000/health >/dev/null 2>&1; then
+      log "Health endpoint OK"
+      break
+    else
+      log "Waiting for service to become healthy... ($i/20)"
+    fi
+    sleep 1
+  done
 }
 
 function find_storage_for_template(){

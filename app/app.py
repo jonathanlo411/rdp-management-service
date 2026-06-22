@@ -113,7 +113,7 @@ def find_free_display(start=99, end=120):
 # The core sequence — mirrors the working shell script exactly
 # ---------------------------------------------------------------------------
 
-def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15):
+def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=5):
     """
     1. Start Xvfb on a free display
     2. Launch xfreerdp
