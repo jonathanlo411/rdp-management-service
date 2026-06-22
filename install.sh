@@ -53,7 +53,7 @@ function configure_container(){
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends \
-    freerdp2-x11 xvfb xdotool python3 python3-pip python3-venv git curl ca-certificates procps
+    freerdp2-x11 xvfb xdotool openbox python3 python3-pip python3-venv git curl ca-certificates procps x11-utils
 
   mkdir -p /opt/automation-runner
   chown root:root /opt/automation-runner

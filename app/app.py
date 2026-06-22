@@ -88,7 +88,7 @@ def _start_xvfb(display=None):
         env['DISPLAY'] = display_value
         app.logger.warning('Starting Xvfb: %s display=%s', XVFB_BIN, display_value)
         proc = subprocess.Popen(
-            [XVFB_BIN, display_value, '-screen', '0', '1024x768x24'],
+            [XVFB_BIN, display_value, '-screen', '0', '1024x768x24', '-ac'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
@@ -114,6 +114,26 @@ def _start_xvfb(display=None):
             continue
 
     raise RuntimeError('No free X display found for Xvfb')
+
+
+def _start_window_manager(display, env):
+    if not shutil.which('openbox'):
+        app.logger.warning('openbox not installed; skipping window manager startup')
+        return None
+
+    app.logger.warning('Starting window manager: openbox display=%s', display)
+    proc = subprocess.Popen(
+        ['openbox'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    time.sleep(2)
+    if proc.poll() is not None:
+        out, err = proc.communicate(timeout=1)
+        raise RuntimeError(f'openbox failed to start: rc={proc.returncode} out={out!r} err={err!r}')
+    return proc
 
 
 def _start_rdp(display, host, user, password):
@@ -213,6 +233,9 @@ def _execute_sequence(payload, seq_keys, typed_command=None):
     display = payload.get('display')
 
     xvfb_proc, display = _start_xvfb(display)
+    env = _build_subprocess_env()
+    env['DISPLAY'] = display
+    wm_proc = _start_window_manager(display, env)
     p = _start_rdp(display, host, user, password)
 
     # Wait for desktop to appear and the RDP window to be available
@@ -248,6 +271,11 @@ def _execute_sequence(payload, seq_keys, typed_command=None):
         p.terminate()
     except Exception:
         pass
+    if wm_proc:
+        try:
+            wm_proc.terminate()
+        except Exception:
+            pass
     try:
         xvfb_proc.terminate()
     except Exception:

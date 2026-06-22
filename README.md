@@ -26,3 +26,5 @@ pct exec 101 -- bash -lc "apt-get update && apt-get install -y curl && curl -fsS
 
 3) After installation, edit `/opt/automation-runner/.env` and `/opt/automation-runner/targets.json` to add secrets and targets.
 
+Note: the installer now includes `openbox` so the headless Xvfb session can support window activation and keyboard automation.
+
