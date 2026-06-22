@@ -9,6 +9,7 @@ set -euo pipefail
 INSTALLER_GIT_REPO="https://github.com/jonathanlo411/rdp-management-service.git"
 
 VM_HOSTNAME="automation-runner"
+VM_TAGS="smarthome;webserver"
 VM_VMID="" # auto if empty
 VM_MEM=512
 VM_CORES=1
@@ -203,7 +204,8 @@ function create_lxc(){
     --memory "$VM_MEM" \
     --rootfs "${VM_STORAGE}:${ROOTFS_SPEC}" \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp \
-    --password "$ROOTPW"
+    --password "$ROOTPW" \
+    --tags "$VM_TAGS"
   pct start "$VM_VMID"
 
   # Clean up template tarball
