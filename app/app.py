@@ -1,317 +1,300 @@
 #!/usr/bin/env python3
+"""
+automation-runner — Flask API that triggers RDP-based automation on Windows targets.
+Rebuilt to mirror the working shell sequence exactly.
+"""
+
 import os
-import sys
-import time
-from flask import Flask, jsonify, request, abort
-from dotenv import load_dotenv
 import subprocess
+import time
 import shutil
-import config
+import json
+import logging
+
+from flask import Flask, jsonify, request
+from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Paths & config
+# ---------------------------------------------------------------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.getenv('ENV_PATH') or os.path.join(BASE_DIR, '.env')
+ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, '..'))  # /opt/automation-runner
 
-# Ensure local app directory is on path for action imports
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
-
-if not os.path.exists(ENV_PATH):
-    alt_env = '/opt/automation-runner/.env'
-    if os.path.exists(alt_env):
-        ENV_PATH = alt_env
+ENV_PATH = os.getenv('ENV_PATH', os.path.join(ROOT_DIR, '.env'))
+TARGETS_PATH = os.getenv('TARGETS_PATH', os.path.join(ROOT_DIR, 'targets.json'))
 
 load_dotenv(ENV_PATH)
 
 API_KEY = os.getenv('API_KEY')
 
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
 app = Flask(__name__)
-app.logger.info('Using ENV_PATH=%s TARGETS_PATH=%s', ENV_PATH, config.TARGETS_PATH)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)s %(message)s')
+log = app.logger
+
+
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 
 def authorize(req):
-    auth = req.headers.get('Authorization')
-    if not auth or not auth.startswith('Bearer '):
+    auth = req.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
         return False
-    token = auth.split(' ', 1)[1].strip()
-    return API_KEY is not None and token == API_KEY
+    return API_KEY is not None and auth.split(' ', 1)[1].strip() == API_KEY
+
+
+# ---------------------------------------------------------------------------
+# Target resolution
+# ---------------------------------------------------------------------------
+
+def load_targets():
+    if not os.path.exists(TARGETS_PATH):
+        return {}
+    with open(TARGETS_PATH) as f:
+        return json.load(f)
+
+
+def get_target(name):
+    targets = load_targets()
+    return targets.get(name)
+
+
+# ---------------------------------------------------------------------------
+# Core: run a shell command, capturing output, with a timeout
+# ---------------------------------------------------------------------------
+
+def run(cmd, timeout=30):
+    """Run a command (list or string). Returns (returncode, stdout, stderr)."""
+    log.debug('RUN: %s', cmd if isinstance(cmd, str) else ' '.join(cmd))
+    result = subprocess.run(
+        cmd,
+        shell=isinstance(cmd, str),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        log.warning('  rc=%s stdout=%r stderr=%r', result.returncode, result.stdout[:200], result.stderr[:200])
+    else:
+        log.debug('  rc=0 stdout=%r', result.stdout[:200])
+    return result.returncode, result.stdout, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Find a free X display slot
+# ---------------------------------------------------------------------------
+
+def find_free_display(start=99, end=120):
+    for n in range(start, end):
+        if not os.path.exists(f'/tmp/.X{n}-lock'):
+            return f':{n}'
+    raise RuntimeError('No free X display slot found')
+
+
+# ---------------------------------------------------------------------------
+# The core sequence — mirrors the working shell script exactly
+# ---------------------------------------------------------------------------
+
+def rdp_sequence(host, user, password, key_sequence, typed_command=None, wait=15):
+    """
+    1. Start Xvfb on a free display
+    2. Launch xfreerdp
+    3. Wait for the desktop to appear
+    4. Find the RDP window by title
+    5. Send key sequence + optional typed command
+    6. Tear everything down
+
+    All subprocess calls receive the same explicit env with DISPLAY set,
+    matching the manual shell script approach.
+    """
+
+    display = find_free_display()
+    log.info('Using display %s', display)
+
+    # Build a clean env that every subprocess will use — same as exporting
+    # DISPLAY in the shell and running everything in the same session.
+    env = os.environ.copy()
+    env['DISPLAY'] = display
+    env['HOME'] = ROOT_DIR
+    env['XDG_CONFIG_HOME'] = os.path.join(ROOT_DIR, '.config')
+
+    xvfb_bin   = shutil.which('Xvfb')
+    xfreerdp_bin = shutil.which('xfreerdp')
+    xdotool_bin  = shutil.which('xdotool')
+
+    for name, path in [('Xvfb', xvfb_bin), ('xfreerdp', xfreerdp_bin), ('xdotool', xdotool_bin)]:
+        if not path:
+            raise RuntimeError(f'{name} not found in PATH')
+
+    # ------------------------------------------------------------------
+    # Step 1: Start Xvfb
+    # ------------------------------------------------------------------
+    log.info('Starting Xvfb on %s', display)
+    xvfb_proc = subprocess.Popen(
+        [xvfb_bin, display, '-screen', '0', '1024x768x24', '-ac'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    time.sleep(2)
+    if xvfb_proc.poll() is not None:
+        raise RuntimeError(f'Xvfb failed to start (rc={xvfb_proc.returncode})')
+
+    try:
+        # ------------------------------------------------------------------
+        # Step 2: Launch xfreerdp
+        # ------------------------------------------------------------------
+        log.info('Starting xfreerdp -> %s@%s', user, host)
+        rdp_cmd = [
+            xfreerdp_bin,
+            '/title:automation-runner',
+            f'/v:{host}',
+            f'/u:{user}',
+            f'/p:{password}',
+            '/cert:ignore',
+            '/dynamic-resolution',
+            '+clipboard',
+            '/audio-mode:0',
+        ]
+        rdp_proc = subprocess.Popen(
+            rdp_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        time.sleep(2)
+        if rdp_proc.poll() is not None:
+            raise RuntimeError(f'xfreerdp exited immediately (rc={rdp_proc.returncode})')
+
+        try:
+            # ------------------------------------------------------------------
+            # Step 3: Wait for the Windows desktop to load
+            # ------------------------------------------------------------------
+            log.info('Waiting %ss for Windows desktop...', wait)
+            time.sleep(wait)
+
+            # ------------------------------------------------------------------
+            # Step 4: Find the RDP window
+            # ------------------------------------------------------------------
+            log.info('Searching for RDP window by title "automation-runner"')
+            wid = None
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                rc, out, _ = run([xdotool_bin, 'search', '--name', 'automation-runner'])
+                if rc == 0 and out.strip():
+                    wid = out.strip().splitlines()[0]
+                    break
+                time.sleep(1)
+
+            if not wid:
+                # Fallback: grab whatever window exists
+                rc, out, _ = run([xdotool_bin, 'search', '--name', '.*'])
+                if rc == 0 and out.strip():
+                    wid = out.strip().splitlines()[0]
+                    log.warning('Title search failed; falling back to first window: %s', wid)
+
+            if not wid:
+                raise RuntimeError('Could not find any X window to interact with')
+
+            # Log window name so we know exactly what we're targeting
+            rc, name_out, _ = run([xdotool_bin, 'getwindowname', wid])
+            log.info('Targeting window id=%s name=%r', wid, name_out.strip())
+
+            # ------------------------------------------------------------------
+            # Step 5: Activate window and send input
+            # ------------------------------------------------------------------
+            log.info('Activating window %s', wid)
+            run([xdotool_bin, 'windowactivate', '--sync', wid], timeout=10)
+            time.sleep(1)
+
+            for key in key_sequence:
+                log.info('Sending key: %s', key)
+                run([xdotool_bin, 'key', '--window', wid, '--clearmodifiers', key])
+                time.sleep(1)
+
+            if typed_command:
+                log.info('Typing command: %s', typed_command)
+                run([xdotool_bin, 'type', '--window', wid, '--clearmodifiers', '--delay', '100', typed_command])
+                time.sleep(1)
+                run([xdotool_bin, 'key', '--window', wid, 'Return'])
+                time.sleep(1)
+
+            log.info('Sequence complete')
+            time.sleep(3)
+
+        finally:
+            log.info('Terminating xfreerdp (pid=%s)', rdp_proc.pid)
+            rdp_proc.terminate()
+            try:
+                rdp_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rdp_proc.kill()
+
+    finally:
+        log.info('Terminating Xvfb (pid=%s)', xvfb_proc.pid)
+        xvfb_proc.terminate()
+        try:
+            xvfb_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            xvfb_proc.kill()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({ 'status': 'healthy' })
-
-BIN_DIR = os.getenv('BIN_PATH', '')
-
-def _resolve_binary(name):
-    if BIN_DIR:
-        candidate = os.path.join(BIN_DIR, name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    resolved = shutil.which(name)
-    if resolved:
-        return resolved
-    raise RuntimeError(
-        f'Binary not found: {name}. Set BIN_PATH or install {name} in your PATH.'
-    )
-
-XVFB_BIN = _resolve_binary('Xvfb')
-XFREERDP_BIN = _resolve_binary('xfreerdp')
-XDOTOOL_BIN = _resolve_binary('xdotool')
+    return jsonify({'status': 'healthy'})
 
 
-def _build_subprocess_env():
-    env = os.environ.copy()
-    env['HOME'] = '/opt/automation-runner'
-    env['XDG_CONFIG_HOME'] = '/opt/automation-runner/.config'
-    if BIN_DIR:
-        env['PATH'] = BIN_DIR + os.pathsep + env.get('PATH', '')
-    return env
+def _handle_action(key_sequence, typed_command=None):
+    if not authorize(request):
+        return 'Unauthorized', 401
 
+    payload = request.get_json(silent=True) or {}
 
-def _run(cmd, timeout=None, env=None):
-    env = env or _build_subprocess_env()
-    if isinstance(cmd, str):
-        proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-    else:
-        proc = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        out, err = proc.communicate()
-    if proc.returncode != 0:
-        app.logger.warning('_run failed: cmd=%r rc=%s out=%r err=%r', cmd, proc.returncode, out, err)
-    return proc.returncode, out, err
-
-
-def _start_xvfb(display=None):
-    def try_start(display_value):
-        env = _build_subprocess_env()
-        env['DISPLAY'] = display_value
-        app.logger.warning('Starting Xvfb: %s display=%s', XVFB_BIN, display_value)
-        proc = subprocess.Popen(
-            [XVFB_BIN, display_value, '-screen', '0', '1024x768x24', '-ac'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            text=True,
-        )
-        time.sleep(1)
-        if proc.poll() is not None:
-            out, err = proc.communicate(timeout=1)
-            raise RuntimeError(f'Xvfb failed to start: rc={proc.returncode} out={out!r} err={err!r}')
-        return proc
-
-    if display:
-        return try_start(display), display
-
-    for idx in range(99, 110):
-        display_value = f':{idx}'
-        lock_path = f'/tmp/.X{idx}-lock'
-        if os.path.exists(lock_path):
-            continue
-        try:
-            return try_start(display_value), display_value
-        except RuntimeError:
-            continue
-
-    raise RuntimeError('No free X display found for Xvfb')
-
-
-def _start_window_manager(display, env):
-    if not shutil.which('openbox'):
-        app.logger.warning('openbox not installed; skipping window manager startup')
-        return None
-
-    app.logger.warning('Starting window manager: openbox display=%s', display)
-    proc = subprocess.Popen(
-        ['openbox'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        text=True,
-    )
-    time.sleep(2)
-    if proc.poll() is not None:
-        out, err = proc.communicate(timeout=1)
-        raise RuntimeError(f'openbox failed to start: rc={proc.returncode} out={out!r} err={err!r}')
-    return proc
-
-
-def _start_rdp(display, host, user, password):
-    env = _build_subprocess_env()
-    env['DISPLAY'] = display
-    args = [
-        XFREERDP_BIN,
-        '/title:automation-runner',
-        f'/v:{host}',
-        f'/u:{user}',
-        f'/p:{password}',
-        '/cert:ignore',
-        '/dynamic-resolution',
-        '+clipboard',
-        '/audio-mode:0',
-        '/log-level:trace',
-    ]
-    app.logger.warning('Starting RDP connection to host=%s user=%s', host, user)
-    proc = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        text=True,
-    )
-    time.sleep(2)
-    if proc.poll() is not None:
-        out, err = proc.communicate(timeout=1)
-        raise RuntimeError(f'xfreerdp failed to start: rc={proc.returncode} out={out!r} err={err!r}')
-    return proc
-
-
-def _find_rdp_window(display, timeout=15):
-    env = _build_subprocess_env()
-    env['DISPLAY'] = display
-
-    def search_by_title():
-        rc, out, err = _run([XDOTOOL_BIN, 'search', '--name', 'automation-runner'], env=env)
-        if rc == 0 and out.strip():
-            return out.strip().splitlines()[0]
-        return None
-
-    def search_by_geometry():
-        rc, out, err = _run([XDOTOOL_BIN, 'search', '--all', '--name', '.*'], env=env)
-        if rc != 0 or not out.strip():
-            return None
-
-        window_ids = [line.strip() for line in out.splitlines() if line.strip()]
-        for wid in window_ids:
-            rc2, geo_out, geo_err = _run([XDOTOOL_BIN, 'getwindowgeometry', '--shell', wid], env=env)
-            if rc2 != 0:
-                continue
-            geom = {k: v for k, v in (line.split('=', 1) for line in geo_out.splitlines() if '=' in line)}
-            if geom.get('X') == '0' and geom.get('Y') == '0' and geom.get('WIDTH') == '1024' and geom.get('HEIGHT') == '768':
-                return wid
-        return window_ids[0] if window_ids else None
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        window_id = search_by_title()
-        if window_id:
-            return window_id
-
-        window_id = search_by_geometry()
-        if window_id:
-            app.logger.warning('Falling back to RDP window by geometry/first window: %s', window_id)
-            return window_id
-
-        time.sleep(0.5)
-
-    raise RuntimeError('Timed out waiting for the RDP window')
-
-
-def _execute_sequence(payload, seq_keys, typed_command=None):
-    # payload should include 'target' (name) or fallback env vars
-    payload = payload or {}
-    target_name = payload.get('target')
+    target_name = payload.get('target') or request.args.get('target')
     if not target_name:
-        raise RuntimeError('Payload must include a "target" field')
+        return 'Missing "target" in request body', 400
 
-    # try configured targets first
-    tgt = config.get_target(target_name)
+    tgt = get_target(target_name)
     if not tgt:
-        host = os.getenv('WINDOWS_HOST')
-        user = os.getenv('WINDOWS_USER')
-        password = os.getenv('WINDOWS_PASSWORD')
-        if not (host and user and password):
-            raise RuntimeError(f'Target {target_name} not found and no fallback env vars set')
-        tgt = { 'host': host, 'user': user, 'password': password }
+        return f'Target "{target_name}" not found in {TARGETS_PATH}', 404
 
-    host = tgt.get('host')
-    user = tgt.get('user')
+    host     = tgt.get('host')
+    user     = tgt.get('user')
     password = tgt.get('password')
     if not (host and user and password):
-        raise RuntimeError(f'Target {target_name} missing host/user/password')
+        return f'Target "{target_name}" is missing host, user, or password', 500
 
-    display = payload.get('display')
+    wait = int(payload.get('wait', 15))
 
-    xvfb_proc, display = _start_xvfb(display)
-    env = _build_subprocess_env()
-    env['DISPLAY'] = display
-    wm_proc = _start_window_manager(display, env)
-    p = _start_rdp(display, host, user, password)
-
-    # Wait for desktop to appear and the RDP window to be available
-    time.sleep(payload.get('wait', 15))
-    window_id = _find_rdp_window(display, timeout=15)
-    if not window_id:
-        raise RuntimeError('Unable to determine RDP window ID')
-
-    env = os.environ.copy()
-    env['DISPLAY'] = display
-    rc, out, err = _run([XDOTOOL_BIN, 'windowactivate', '--sync', window_id], env=env)
-    if rc != 0:
-        app.logger.warning('windowactivate failed: rc=%s out=%r err=%r', rc, out, err)
-
-    time.sleep(2)
-
-    for key in seq_keys:
-        rc, out, err = _run([XDOTOOL_BIN, 'key', '--window', window_id, '--clearmodifiers', key], env=env)
-        if rc != 0:
-            app.logger.warning('xdotool key failed: key=%s rc=%s out=%r err=%r', key, rc, out, err)
-        time.sleep(1.5)
-
-    if typed_command:
-        rc, out, err = _run([XDOTOOL_BIN, 'type', '--window', window_id, '--clearmodifiers', '--delay', '100', typed_command], env=env)
-        if rc != 0:
-            app.logger.warning('xdotool type failed: cmd=%s rc=%s out=%r err=%r', typed_command, rc, out, err)
-        time.sleep(1.5)
-        _run([XDOTOOL_BIN, 'key', '--window', window_id, 'Return'], env=env)
-        time.sleep(1)
-
-    time.sleep(5)
     try:
-        p.terminate()
-    except Exception:
-        pass
-    if wm_proc:
-        try:
-            wm_proc.terminate()
-        except Exception:
-            pass
-    try:
-        xvfb_proc.terminate()
-    except Exception:
-        pass
-
-    return { 'status': 'sequence_sent', 'target': target_name }
+        rdp_sequence(host, user, password, key_sequence, typed_command, wait=wait)
+        return jsonify({'status': 'ok', 'target': target_name, 'action': typed_command or key_sequence})
+    except Exception as e:
+        log.exception('Action failed')
+        return f'Action failed: {e}', 500
 
 
 @app.route('/execute/shutdown', methods=['POST'])
 def execute_shutdown():
-    if not authorize(request):
-        return ('Unauthorized', 401)
-    payload = request.get_json(silent=True) or {}
-    if 'target' not in payload and 'target' in request.args:
-        payload['target'] = request.args.get('target')
-    try:
-        result = _execute_sequence(payload, ['super+r'], 'shutdown /s /t 0')
-        return jsonify({ 'result': result })
-    except Exception as e:
-        app.logger.exception('Shutdown action failed')
-        return (f'Action failed: {e}', 500)
+    return _handle_action(['super+r'], 'shutdown /s /t 0')
 
 
 @app.route('/execute/reboot', methods=['POST'])
 def execute_reboot():
-    if not authorize(request):
-        return ('Unauthorized', 401)
-    payload = request.get_json(silent=True) or {}
-    if 'target' not in payload and 'target' in request.args:
-        payload['target'] = request.args.get('target')
-    try:
-        result = _execute_sequence(payload, ['super+r'], 'shutdown /r /t 0')
-        return jsonify({ 'result': result })
-    except Exception as e:
-        app.logger.exception('Reboot action failed')
-        return (f'Action failed: {e}', 500)
+    return _handle_action(['super+r'], 'shutdown /r /t 0')
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
